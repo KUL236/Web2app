@@ -264,7 +264,7 @@ exports.handler = async (event) => {
 
     const { data: profile, error: profileError } = await userClient
       .from('profiles')
-      .select('plan')
+      .select('plan, plan_expires_at')
       .eq('id', user.id)
       .single()
 
@@ -274,14 +274,21 @@ exports.handler = async (event) => {
     }
 
     const quotas = { free: 3, pro: 25, agency: 999 }
-    const userPlan = profile?.plan || 'free'
+    const paidPlanActive = profile?.plan === 'pro'
+      && profile.plan_expires_at
+      && new Date(profile.plan_expires_at).getTime() > Date.now()
+    const userPlan = paidPlanActive ? profile.plan : 'free'
     const quota = quotas[userPlan] || 3
 
     if (monthlyBuilds >= quota) {
       return {
-        statusCode: 429,
+        statusCode: 402,
         headers,
-        body: JSON.stringify({ error: `Monthly build limit (${quota}) reached. Upgrade your plan.` }),
+        body: JSON.stringify({
+          error: `Monthly build limit (${quota}) reached. Upgrade your plan to continue.`,
+          code: 'MONTHLY_LIMIT_REACHED',
+          plan: userPlan,
+        }),
       }
     }
 

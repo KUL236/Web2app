@@ -83,6 +83,17 @@ React (Netlify CDN) + Netlify Functions + Supabase + GitHub Actions
    ```
 5. Click **Deploy site**
 
+### Razorpay payments
+
+Run the updated `supabase-schema.sql`, then add the Razorpay server variables from
+`.env.example` in Netlify (never add the secret values to `VITE_*` variables).
+Create a monthly Razorpay plan and set its ID as `RAZORPAY_PRO_PLAN_ID`. Configure
+the Razorpay webhook URL as `https://YOUR_SITE/.netlify/functions/razorpay-webhook`
+and subscribe to `payment.captured`, `payment.failed`, `order.paid`,
+`subscription.activated`, `subscription.charged`, and `subscription.cancelled`.
+The functions authenticate Supabase users, verify Razorpay signatures, record
+payments, and update the profile's `plan`, `plan_expires_at`, and `credits`.
+
 ---
 
 ## STEP 4: Generate GitHub Personal Access Token

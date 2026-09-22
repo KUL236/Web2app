@@ -17,10 +17,18 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   full_name     TEXT,
   avatar_url    TEXT,
   plan          TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free', 'pro', 'agency')),
+  plan_expires_at TIMESTAMPTZ,
+  credits       INTEGER NOT NULL DEFAULT 0 CHECK (credits >= 0),
   builds_count  INTEGER NOT NULL DEFAULT 0,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Safe migration for projects that already have the profiles table.
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS plan_expires_at TIMESTAMPTZ;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS credits INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE public.profiles DROP CONSTRAINT IF EXISTS profiles_credits_check;
+ALTER TABLE public.profiles ADD CONSTRAINT profiles_credits_check CHECK (credits >= 0);
 
 -- ============================================================
 -- TABLE: apps
@@ -82,6 +90,28 @@ CREATE TABLE IF NOT EXISTS public.notifications (
 );
 
 -- ============================================================
+-- TABLE: payment_records (server-side Razorpay audit trail)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.payment_records (
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                  UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  provider                 TEXT NOT NULL DEFAULT 'razorpay',
+  mode                     TEXT NOT NULL CHECK (mode IN ('one_time', 'subscription')),
+  plan                     TEXT NOT NULL CHECK (plan IN ('pro', 'agency')),
+  amount                   INTEGER NOT NULL CHECK (amount > 0),
+  currency                 TEXT NOT NULL DEFAULT 'INR',
+  razorpay_order_id        TEXT UNIQUE,
+  razorpay_subscription_id TEXT UNIQUE,
+  razorpay_payment_id      TEXT UNIQUE,
+  razorpay_signature       TEXT,
+  status                   TEXT NOT NULL DEFAULT 'created'
+                           CHECK (status IN ('created', 'captured', 'failed', 'refunded')),
+  raw_payload              JSONB,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================
 -- INDEXES for performance
 -- ============================================================
 CREATE INDEX IF NOT EXISTS idx_apps_user_id ON public.apps(user_id);
@@ -101,6 +131,9 @@ CREATE INDEX IF NOT EXISTS idx_downloads_downloaded_at ON public.downloads(downl
 CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON public.notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_read ON public.notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON public.notifications(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payment_records_user_id ON public.payment_records(user_id);
+CREATE INDEX IF NOT EXISTS idx_payment_records_status ON public.payment_records(status);
+CREATE INDEX IF NOT EXISTS idx_payment_records_created_at ON public.payment_records(created_at DESC);
 
 -- ============================================================
 -- TRIGGERS: Auto-update updated_at
@@ -119,6 +152,10 @@ CREATE TRIGGER trg_profiles_updated_at
 
 CREATE TRIGGER trg_apps_updated_at
   BEFORE UPDATE ON public.apps
+  FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
+CREATE TRIGGER trg_payment_records_updated_at
+  BEFORE UPDATE ON public.payment_records
   FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
 -- ============================================================
@@ -164,6 +201,7 @@ ALTER TABLE public.apps          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.builds        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.downloads     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.payment_records ENABLE ROW LEVEL SECURITY;
 
 -- ── profiles ────────────────────────────────────────────────
 CREATE POLICY "Users can view own profile"
@@ -243,6 +281,15 @@ CREATE POLICY "Service role can insert notifications"
   ON public.notifications FOR INSERT
   WITH CHECK (TRUE);
 
+CREATE POLICY "Users can view own payment records"
+  ON public.payment_records FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Service role full access to payment records"
+  ON public.payment_records FOR ALL
+  USING (auth.role() = 'service_role')
+  WITH CHECK (auth.role() = 'service_role');
+
 -- ============================================================
 -- GRANT permissions to authenticated users
 -- ============================================================
@@ -252,6 +299,7 @@ GRANT ALL ON public.apps TO authenticated;
 GRANT ALL ON public.builds TO authenticated;
 GRANT ALL ON public.downloads TO authenticated;
 GRANT ALL ON public.notifications TO authenticated;
+GRANT SELECT ON public.payment_records TO authenticated;
 
 -- Service role
 GRANT ALL ON public.profiles TO service_role;
@@ -259,6 +307,7 @@ GRANT ALL ON public.apps TO service_role;
 GRANT ALL ON public.builds TO service_role;
 GRANT ALL ON public.downloads TO service_role;
 GRANT ALL ON public.notifications TO service_role;
+GRANT ALL ON public.payment_records TO service_role;
 
 -- ============================================================
 -- REALTIME (optional — enable for live build status updates)

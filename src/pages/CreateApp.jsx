@@ -131,6 +131,11 @@ export default function CreateApp() {
         }),
       })
       const data = await response.json().catch(() => ({}))
+      if (response.status === 402 && data.code === 'MONTHLY_LIMIT_REACHED') {
+        toast.error(data.error)
+        navigate('/pricing')
+        return
+      }
       if (!response.ok) throw new Error(data.error || 'Failed to create app')
 
       toast.success('App created! Build started...')
