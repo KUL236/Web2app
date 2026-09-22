@@ -145,6 +145,14 @@ exports.handler = async (event) => {
       hasNodeWebSocket: Boolean(nodeWebSocket),
     })
 
+    if (!supabaseUrl || !supabaseServiceKey) {
+      return {
+        statusCode: 500,
+        headers,
+        body: JSON.stringify({ error: 'Supabase server configuration is missing' }),
+      }
+    }
+
     const adminClient = createClient(supabaseUrl, supabaseServiceKey, {
       realtime: nodeWebSocket ? { transport: nodeWebSocket } : undefined,
     })
@@ -220,7 +228,7 @@ exports.handler = async (event) => {
     }
 
     // 3. Check package name uniqueness
-    const { data: existing, error: existingError } = await userClient
+    const { data: existing, error: existingError } = await adminClient
       .from('apps')
       .select('id')
       .eq('package_name', package_name)
@@ -228,7 +236,10 @@ exports.handler = async (event) => {
 
     if (existingError) {
       console.error('create-app package lookup error', existingError)
-      return { statusCode: 500, headers, body: JSON.stringify({ error: 'Failed to verify package name' }) }
+      const errorMessage = existingError.code === 'PGRST205'
+        ? 'Database is not initialized. Run supabase-schema.sql in Supabase SQL Editor.'
+        : 'Failed to verify package name'
+      return { statusCode: 500, headers, body: JSON.stringify({ error: errorMessage }) }
     }
 
     if (existing) {
