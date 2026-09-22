@@ -54,7 +54,7 @@ React (Netlify CDN) + Netlify Functions + Supabase + GitHub Actions
    KEYSTORE_PASSWORD      = YOUR_STORE_PASSWORD
    KEY_ALIAS              = web2app
    KEY_PASSWORD           = YOUR_KEY_PASSWORD
-   SUPABASE_URL           = https://lgmndgllitkbdbjiyaef.supabase.co
+   SUPABASE_URL           = https://rvfhqaynokcxideepuqh.supabase.co
    SUPABASE_SERVICE_ROLE_KEY = (from Supabase settings)
    INTERNAL_SECRET        = (generate: openssl rand -hex 32)
    ```
@@ -70,10 +70,10 @@ React (Netlify CDN) + Netlify Functions + Supabase + GitHub Actions
    - Publish directory: `dist`
 4. Go to **Site Settings → Environment Variables** and add ALL of these:
    ```
-   VITE_SUPABASE_URL          = https://lgmndgllitkbdbjiyaef.supabase.co
-   VITE_SUPABASE_ANON_KEY     = sb_publishable_sfZ4-OzupQmdN7OCZQpVrg_I1jCaloE
+   VITE_SUPABASE_URL          = https://rvfhqaynokcxideepuqh.supabase.co
+   VITE_SUPABASE_ANON_KEY     = (Supabase anon/publishable key)
    VITE_NETLIFY_URL           = https://web2appconversion.netlify.app/
-   SUPABASE_URL               = https://lgmndgllitkbdbjiyaef.supabase.co
+   SUPABASE_URL               = https://rvfhqaynokcxideepuqh.supabase.co
    SUPABASE_SERVICE_ROLE_KEY  = (service role key from Supabase)
    GITHUB_TOKEN               = (Personal Access Token — needs repo + workflow scopes)
    GITHUB_OWNER               = your_github_username
