@@ -1,0 +1,230 @@
+name: Build Android APK
+
+# The run name carries the build id. The web app uses it to find this run through the
+# GitHub API, so build status still updates even if the callback below cannot reach Netlify.
+run-name: build-${{ github.event.client_payload.buildId || inputs.buildId || github.run_id }}
+
+on:
+  repository_dispatch:
+    types: [build-apk]
+  workflow_dispatch: # manual test run from the Actions tab
+    inputs:
+      buildId:
+        description: Build id (leave empty for a manual test)
+        required: false
+      appName:
+        description: App name
+        required: true
+        default: Test App
+      packageName:
+        description: Package name
+        required: true
+        default: com.test.webapp
+      websiteUrl:
+        description: Website URL (https)
+        required: true
+        default: https://example.com
+      iconColor:
+        description: Icon background colour
+        required: false
+        default: '#6366f1'
+      iconUrl:
+        description: Logo image URL (optional)
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    # User supplied values only ever travel through environment variables.
+    # They are never interpolated into shell scripts (prevents command injection).
+    env:
+      BUILD_ID: ${{ github.event.client_payload.buildId || inputs.buildId || github.run_id }}
+      APP_NAME: ${{ github.event.client_payload.appName || inputs.appName }}
+      PACKAGE_NAME: ${{ github.event.client_payload.packageName || inputs.packageName }}
+      WEBSITE_URL: ${{ github.event.client_payload.websiteUrl || inputs.websiteUrl }}
+      ICON_COLOR: ${{ github.event.client_payload.iconColor || inputs.iconColor }}
+      ICON_URL: ${{ github.event.client_payload.iconUrl || inputs.iconUrl }}
+      ICON_SOURCE: ${{ github.event.client_payload.iconSource }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      CALLBACK_SECRET: ${{ github.event.client_payload.callback_secret }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Notify - build started
+        run: bash scripts/notify.sh building
+
+      - name: Check build inputs
+        run: |
+          missing=""
+          for v in BUILD_ID APP_NAME PACKAGE_NAME WEBSITE_URL; do
+            [ -z "${!v}" ] && missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing build payload:$missing. Start this workflow from the web app or with the manual inputs."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # platforms;android-34 + build-tools;34.0.0 match compileSdk / buildToolsVersion in app/build.gradle
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Prepare app (name, colours, launcher icon)
+        run: |
+          python3 -m pip install --quiet pillow
+          python3 scripts/prepare_android.py
+
+      - name: Build release APK (unsigned)
+        working-directory: android-template
+        run: |
+          chmod +x gradlew
+          VERSION_CODE=$(( GITHUB_RUN_NUMBER ))
+          ./gradlew assembleRelease --no-daemon --no-build-cache --stacktrace \
+            -PappPackage="$PACKAGE_NAME" \
+            -PappName="$APP_NAME" \
+            -PwebsiteUrl="$WEBSITE_URL" \
+            -PbuildId="$BUILD_ID" \
+            -PappVersionCode="$VERSION_CODE" \
+            -PappVersionName="1.0.${VERSION_CODE}"
+
+      - name: Notify - signing
+        run: bash scripts/notify.sh signing
+
+      - name: Align and sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD_SECRET: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BT="$SDK/build-tools/34.0.0"
+          KS="$RUNNER_TEMP/release.jks"
+
+          if [ -n "${KEYSTORE_BASE64:-}" ] && [ -n "${KEYSTORE_PASSWORD_SECRET:-}" ] && [ -n "${KEY_ALIAS_SECRET:-}" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KS"
+            export KS_PASS="$KEYSTORE_PASSWORD_SECRET"
+            KEY_ALIAS="$KEY_ALIAS_SECRET"
+            export KEY_PASS="${KEY_PASSWORD_SECRET:-$KEYSTORE_PASSWORD_SECRET}"
+            if ! keytool -list -keystore "$KS" -storepass "$KS_PASS" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+              echo "::error::Keystore secrets are invalid (wrong KEYSTORE_BASE64, KEYSTORE_PASSWORD or KEY_ALIAS)."
+              exit 1
+            fi
+          else
+            echo "::warning::KEYSTORE_* secrets are not set - signing with a temporary key. Add the secrets to keep a stable signature."
+            KS_PASS="$(openssl rand -hex 16)"
+            export KS_PASS
+            echo "::add-mask::$KS_PASS"
+            export KEY_PASS="$KS_PASS"
+            KEY_ALIAS=web2app
+            keytool -genkeypair -keystore "$KS" -storepass "$KS_PASS" -keypass "$KEY_PASS" \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Web2App AI, O=Web2App, C=IN" > /dev/null
+          fi
+
+          UNSIGNED="$(find android-template/app/build/outputs/apk/release -name '*.apk' | head -1)"
+          if [ -z "$UNSIGNED" ]; then
+            echo "::error::Gradle finished but no release APK was produced."
+            exit 1
+          fi
+
+          mkdir -p dist
+          FINAL="$GITHUB_WORKSPACE/dist/${PACKAGE_NAME}-${BUILD_ID:0:8}.apk"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KS_PASS --key-pass env:KEY_PASS \
+            --out "$FINAL" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --verbose "$FINAL"
+
+          echo "FINAL_APK=$FINAL" >> "$GITHUB_ENV"
+          echo "APK_NAME=$(basename "$FINAL")" >> "$GITHUB_ENV"
+
+      # Proves that THIS build really contains THIS package / app name / website.
+      - name: Verify APK contents
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BADGING="$("$SDK/build-tools/34.0.0/aapt2" dump badging "$FINAL_APK")"
+          PKG="$(printf '%s\n' "$BADGING" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -1)"
+          VCODE="$(printf '%s\n' "$BADGING" | sed -n "s/.* versionCode='\([^']*\)'.*/\1/p" | head -1)"
+          LABEL="$(printf '%s\n' "$BADGING" | sed -n "s/^application-label:'\(.*\)'$/\1/p" | head -1)"
+          SIZE="$(stat -c%s "$FINAL_APK")"
+          SHA="$(sha256sum "$FINAL_APK" | cut -d' ' -f1)"
+
+          if [ "$PKG" != "$PACKAGE_NAME" ]; then
+            echo "::error::APK package is '$PKG' but '$PACKAGE_NAME' was requested."
+            exit 1
+          fi
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "::error::APK is suspiciously small ($SIZE bytes)."
+            exit 1
+          fi
+
+          echo "APK_SIZE=$SIZE" >> "$GITHUB_ENV"
+          echo "APK_SHA256=$SHA" >> "$GITHUB_ENV"
+          {
+            echo "### APK built"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| App name | \`$LABEL\` |"
+            echo "| Package | \`$PKG\` |"
+            echo "| Version code | \`$VCODE\` |"
+            echo "| Website | $WEBSITE_URL |"
+            echo "| Size | $SIZE bytes |"
+            echo "| SHA-256 | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified: $PKG ($LABEL) v$VCODE, $SIZE bytes"
+
+      - name: Publish GitHub release
+        run: |
+          set -euo pipefail
+          TAG="build-${BUILD_ID}"
+          gh release delete "$TAG" --cleanup-tag --yes >/dev/null 2>&1 || true
+          NOTES="$(printf 'Build ID: %s\nPackage: %s\nWebsite: %s\nSHA-256: %s\nRun: %s' \
+            "$BUILD_ID" "$PACKAGE_NAME" "$WEBSITE_URL" "$APK_SHA256" "$GITHUB_RUN_ID")"
+          gh release create "$TAG" "$FINAL_APK" \
+            --target "$GITHUB_SHA" \
+            --title "$APP_NAME ($PACKAGE_NAME)" \
+            --notes "$NOTES" \
+            --latest=false
+          echo "DOWNLOAD_URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${APK_NAME}" >> "$GITHUB_ENV"
+
+      - name: Notify - complete
+        run: bash scripts/notify.sh complete
+
+      - name: Notify - failed
+        if: failure()
+        run: |
+          STEP="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --jq '[.jobs[].steps[] | select(.conclusion=="failure") | .name][0] // "unknown step"' 2>/dev/null || echo "unknown step")"
+          bash scripts/notify.sh failed "Build failed at step: ${STEP}"
+
+      - name: Upload APK artifact (backup copy)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ env.BUILD_ID }}
+          path: dist/*.apk
+          retention-days: 3
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/release.jks "$RUNNER_TEMP"/aligned.apk
